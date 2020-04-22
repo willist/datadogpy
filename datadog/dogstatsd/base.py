@@ -470,7 +470,8 @@ class DogStatsd(object):
             if self._telemetry:
                 if flush_telemetry:
                     if self.telemetry_destination:
-                        (self.telemetry_socket or self.get_socket(telemetry=True)).send(telemetry_packet.encode(self.encoding))
+                        (self.telemetry_socket or self.get_socket(telemetry=True)).send(
+                            telemetry_packet.encode(self.encoding))
                     self._reset_telemetry()
                 self.packets_sent += 1
                 self.bytes_sent += len(packet)
