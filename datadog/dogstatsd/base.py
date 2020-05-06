@@ -51,7 +51,7 @@ class DogStatsd(object):
                  constant_tags=None, use_ms=False, use_default_route=False,
                  socket_path=None, default_sample_rate=1, disable_telemetry=False,
                  telemetry_min_flush_interval=DEFAULT_TELEMETRY_MIN_FLUSH_INTERVAL,
-                 telemetry_host=None, telemetry_port=DEFAULT_PORT, telemetry_socket_path=None):
+                 telemetry_host=None, telemetry_port=None, telemetry_socket_path=None):
         """
         Initialize a DogStatsd object.
 
@@ -159,7 +159,7 @@ class DogStatsd(object):
 
         # Assuming environment variables always override
         telemetry_host = os.environ.get('DD_TELEMETRY_HOST', telemetry_host)
-        telemetry_port = os.environ.get('DD_TELEMETRY_PORT', telemetry_port)
+        telemetry_port = os.environ.get('DD_TELEMETRY_PORT', telemetry_port) or port
 
         # Connection
         if socket_path is not None:
@@ -173,17 +173,13 @@ class DogStatsd(object):
             self.port = int(port)
             transport = "udp"
 
-        self.telemetry_destination = True
-        if telemetry_socket_path is not None:
-            self.telemetry_socket_path = telemetry_socket_path
-            self.telemetry_host = None
-            self.telemetry_port = None
-        elif telemetry_host:
+        self.telemetry_socket_path = telemetry_socket_path
+        self.telemetry_host = None
+        self.telemetry_port = None
+        if not telemetry_socket_path and telemetry_host:
             self.telemetry_socket_path = None
             self.telemetry_host = self.resolve_host(telemetry_host, use_default_route)
             self.telemetry_port = int(telemetry_port)
-        else:
-            self.telemetry_destination = False
 
         # Socket
         self.socket = None
@@ -228,6 +224,9 @@ class DogStatsd(object):
     def enable_telemetry(self):
         self._telemetry = True
 
+    def _dedicated_telemetry_destination(self):
+        return bool(self.telemetry_socket_path or self.telemetry_host)
+
     def __enter__(self):
         self.open_buffer(self.max_buffer_size)
         return self
@@ -258,33 +257,36 @@ class DogStatsd(object):
         avoid bad thread race conditions.
         """
         with self.lock:
-            if telemetry and self.telemetry_destination:
+            if telemetry and self._dedicated_telemetry_destination():
                 if not self.telemetry_socket:
                     if self.telemetry_socket_path is not None:
-                        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                        sock.connect(self.socket_path)
-                        sock.setblocking(0)
-                        self.telemetry_socket = sock
+                        self.telemetry_socket = self._get_uds_socket(self.telemetry_socket_path)
                     else:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        sock.connect((self.telemetry_host, self.telemetry_port))
-                        self.telemetry_socket = sock
+                        self.telemetry_socket = self._get_udp_socket_socket(
+                            self.telemetry_host, self.telemetry_port)
+
+                return self.telemetry_socket
             else:
                 if not self.socket:
                     if self.socket_path is not None:
-                        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                        sock.connect(self.socket_path)
-                        sock.setblocking(0)
-                        self.socket = sock
+                        self.socket = self._get_uds_socket(self.socket_path)
                     else:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        sock.connect((self.host, self.port))
-                        self.socket = sock
-
-        if telemetry and self.telemetry_destination:
-            return self.telemetry_socket
+                        self.socket = self._get_udp_socket(self.host, self.port)
 
         return self.socket
+
+    @staticmethod
+    def _get_uds_socket(socket_path):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.connect(socket_path)
+        sock.setblocking(0)
+        return sock
+
+    @staticmethod
+    def _get_udp_socket(host, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect((host, port))
+        return sock
 
     def open_buffer(self, max_buffer_size=50):
         """
@@ -489,7 +491,7 @@ class DogStatsd(object):
         flush_telemetry = self._is_telemetry_flush_time()
         if flush_telemetry:
             telemetry_packet = self._flush_telemetry()
-            if not self.telemetry_destination:
+            if not self._dedicated_telemetry_destination():
                 packet += "\n"+telemetry_packet
 
         try:
@@ -497,7 +499,7 @@ class DogStatsd(object):
             (self.socket or self.get_socket()).send(packet.encode(self.encoding))
             if self._telemetry:
                 if flush_telemetry:
-                    if self.telemetry_destination:
+                    if self._dedicated_telemetry_destination():
                         (self.telemetry_socket or self.get_socket(telemetry=True)).send(
                             telemetry_packet.encode(self.encoding))
                     self._reset_telemetry()
