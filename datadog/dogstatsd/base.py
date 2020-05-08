@@ -488,23 +488,24 @@ class DogStatsd(object):
         return False
 
     def _send_to_server(self, packet):
-        flush_telemetry = self._is_telemetry_flush_time()
-        if flush_telemetry:
-            telemetry_packet = self._flush_telemetry()
-            if not self._dedicated_telemetry_destination():
-                packet += "\n"+telemetry_packet
-
         try:
+            flush_telemetry = self._is_telemetry_flush_time()
+            if flush_telemetry:
+                telemetry_packet = self._flush_telemetry()
+                if not self._dedicated_telemetry_destination():
+                    packet += "\n"+telemetry_packet
+                else:
+                    (self.telemetry_socket or self.get_socket(telemetry=True)).send(
+                        telemetry_packet.encode(self.encoding))
+
+                self._reset_telemetry()
+
             # If set, use socket directly
             (self.socket or self.get_socket()).send(packet.encode(self.encoding))
             if self._telemetry:
-                if flush_telemetry:
-                    if self._dedicated_telemetry_destination():
-                        (self.telemetry_socket or self.get_socket(telemetry=True)).send(
-                            telemetry_packet.encode(self.encoding))
-                    self._reset_telemetry()
                 self.packets_sent += 1
                 self.bytes_sent += len(packet)
+
             return
         except socket.timeout:
             # dogstatsd is overflowing, drop the packets (mimicks the UDP behaviour)
