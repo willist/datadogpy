@@ -41,6 +41,12 @@ SUCCESS = 'success'
 ERROR = 'error'
 WARNING = 'warning'
 
+MODE_ALERT_MAPPING = {
+    'all': (ERROR, WARNING, SUCCESS),
+    'warnings': (ERROR, WARNING),
+    'errors': (ERROR,),
+}
+
 MAX_EVENT_BODY_LENGTH = 3000
 
 
@@ -231,21 +237,24 @@ def build_event_body(cmd, returncode, stdout, stderr, notifications):
         )
 
 
-def generate_warning_codes(option, opt, options_warning):
+def generate_status_codes(option, opt, options_status):
+    if options_status == '':
+        return []
+
     try:
-        # options_warning is a string e.g.: --warning_codes 123,456,789
+        # options_status is a string e.g.: --warning_codes 123,456,789
         # we need to create a list from it
-        warning_codes = options_warning.split(",")
-        return warning_codes
+        status_codes = options_status.split(",")
+        return list(map(int, status_codes))
     except ValueError:
-        raise optparse.OptionValueError("option %s: invalid warning codes value(s): %r" % (opt, options_warning))
+        raise optparse.OptionValueError("option %s: invalid warning codes value(s): %r" % (opt, options_status))
 
 
 class DogwrapOption(optparse.Option):
     # https://docs.python.org/3.7/library/optparse.html#adding-new-types
-    TYPES = optparse.Option.TYPES + ("warning_codes",)
+    TYPES = optparse.Option.TYPES + ("status_codes",)
     TYPE_CHECKER = copy(optparse.Option.TYPE_CHECKER)
-    TYPE_CHECKER["warning_codes"] = generate_warning_codes
+    TYPE_CHECKER["status_codes"] = generate_status_codes
 
 
 def parse_options(raw_args=None):
@@ -269,8 +278,10 @@ to send data, us (datadoghq.com) or eu (datadoghq.eu), default: us")
                       default='errors', choices=['errors', 'warnings', 'all'], help="[ all | errors | warnings ] if set \
 to error, an event will be sent only of the command exits with a non zero exit status or if it \
 times out. If set to warning, a list of exit codes need to be provided")
-    parser.add_option('--warning_codes', action='store', type='warning_codes', dest='warning_codes',
-                      help="comma separated list of warning codes, e.g: 127,255")
+    parser.add_option('--success_codes', action='store', type='status_codes', dest='success_codes',
+                      help="comma separated list of success codes, e.g: 0,200", default='0')
+    parser.add_option('--warning_codes', action='store', type='status_codes', dest='warning_codes',
+                      help="comma separated list of warning codes, e.g: 127,255", default='')
     parser.add_option('-p', '--priority', action='store', type='choice', choices=['normal', 'low'],
                       help="the priority of the event (default: 'normal')")
     parser.add_option('-t', '--timeout', action='store', type='int', default=60 * 60 * 24,
@@ -332,30 +343,16 @@ def main():
     initialize(api_key=options.api_key, api_host=api_host)
     host = api._host_name
 
-    warning_codes = None
-
-    if options.warning_codes:
-        # Convert warning codes from string to int since return codes will evaluate the latter
-        warning_codes = list(map(int, options.warning_codes))
-
-    if returncode == 0:
+    if returncode in options.success_codes:
         alert_type = SUCCESS
         event_priority = 'low'
         event_title = u'[%s] %s succeeded in %.2fs' % (host, options.name,
                                                        duration)
-    elif returncode != 0 and options.submit_mode == 'warnings':
-        if not warning_codes:
-            # the list of warning codes is empty - the option was not specified
-            print("A comma separated list of exit codes need to be provided")
-            sys.exit()
-        elif returncode in warning_codes:
-            alert_type = WARNING
-            event_priority = 'normal'
-            event_title = u'[%s] %s failed in %.2fs' % (host, options.name,
-                                                        duration)
-        else:
-            print("Command exited with a different exit code that the one(s) provided")
-            sys.exit()
+    elif returncode in options.warning_codes:
+        alert_type = WARNING
+        event_priority = 'normal'
+        event_title = u'[%s] %s failed in %.2fs' % (host, options.name,
+                                                    duration)
     else:
         alert_type = ERROR
         event_priority = 'normal'
@@ -398,15 +395,15 @@ def main():
         print(stderr.strip(), file=sys.stderr)
         print(stdout.strip(), file=sys.stdout)
 
-    if options.submit_mode == 'all' or returncode != 0:
+    if alert_type in MODE_ALERT_MAPPING[options.submit_mode]:
         if options.send_metric:
             event_name_tag = "event_name:{}".format(options.name)
             if tags:
                 duration_tags = tags + [event_name_tag]
             else:
                 duration_tags = [event_name_tag]
-            api.Metric.send(metric='dogwrap.duration', points=duration, tags=duration_tags, type="gauge")
-        api.Event.create(title=event_title, text=event_body, **event)
+            print(dict(metric='dogwrap.duration', points=duration, tags=duration_tags, type="gauge"))
+        print(dict(title=event_title, text=event_body, **event))
 
     sys.exit(returncode)
 
